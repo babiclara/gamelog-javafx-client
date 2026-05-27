@@ -12,12 +12,15 @@ import javafx.beans.property.SimpleStringProperty;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.fxml.FXML;
-import javafx.scene.control.Button;
-import javafx.scene.control.Label;
-import javafx.scene.control.TableColumn;
-import javafx.scene.control.TableView;
+import javafx.fxml.FXMLLoader;
+import javafx.scene.Parent;
+import javafx.scene.Scene;
+import javafx.scene.control.*;
+import javafx.stage.Modality;
+import javafx.stage.Stage;
 
 import java.util.List;
+import java.util.Optional;
 
 public class GamesController {
 
@@ -51,27 +54,32 @@ public class GamesController {
         gamesTable.setItems(games);
 
         gamesTable.getSelectionModel().selectedItemProperty().addListener((obs, oldSel, newSel) -> {
+            boolean hasSelection = newSel != null;
+            boolean isAdmin = isCurrentUserAdmin();
+            editButton.setDisable(!hasSelection || !isAdmin);
+            deleteButton.setDisable(!hasSelection || !isAdmin);
         });
 
+        boolean admin = isCurrentUserAdmin();
+        newButton.setDisable(!admin);
+        backupButton.setDisable(!admin);
+        restoreButton.setDisable(!admin);
+
         loadGames();
+    }
+
+    private boolean isCurrentUserAdmin() {
+        return "admin".equals(Session.getUsername());
     }
 
     private void configureColumns() {
         idCol.setCellValueFactory(c ->
                 new SimpleIntegerProperty(c.getValue().getId() == null ? 0 : c.getValue().getId().intValue())
         );
-        titleCol.setCellValueFactory(c ->
-                new SimpleStringProperty(c.getValue().getTitle())
-        );
-        developerCol.setCellValueFactory(c ->
-                new SimpleStringProperty(c.getValue().getDeveloper())
-        );
-        platformCol.setCellValueFactory(c ->
-                new SimpleStringProperty(c.getValue().getPlatform())
-        );
-        statusCol.setCellValueFactory(c ->
-                new SimpleStringProperty(c.getValue().getStatus())
-        );
+        titleCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getTitle()));
+        developerCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getDeveloper()));
+        platformCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getPlatform()));
+        statusCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getStatus()));
         ratingCol.setCellValueFactory(c -> {
             Integer r = c.getValue().getRating();
             return new SimpleObjectProperty<>(r == null ? 0 : r);
@@ -97,34 +105,144 @@ public class GamesController {
         }
     }
 
-    @FXML private void handleNew() {}
-    @FXML private void handleEdit() {}
-    @FXML private void handleDelete() {}
-    @FXML private void handleBackup() {}
-    @FXML private void handleRestore() {}
+    @FXML
+    private void handleNew() {
+        openGameForm(null);
+    }
+
+    @FXML
+    private void handleEdit() {
+        Game selected = gamesTable.getSelectionModel().getSelectedItem();
+        if (selected == null) return;
+        openGameForm(selected);
+    }
+
+    @FXML
+    private void handleDelete() {
+        Game selected = gamesTable.getSelectionModel().getSelectedItem();
+        if (selected == null) return;
+
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+        confirm.setTitle("Delete game");
+        confirm.setHeaderText("Delete \"" + selected.getTitle() + "\"?");
+        confirm.setContentText("This cannot be undone.");
+
+        Optional<ButtonType> result = confirm.showAndWait();
+        if (result.isEmpty() || result.get() != ButtonType.OK) return;
+
+        setStatus("Deleting...", "gray");
+        new Thread(() -> {
+            try {
+                ApiClient.deleteGame(selected.getId());
+                Platform.runLater(() -> {
+                    setStatus("Deleted \"" + selected.getTitle() + "\".", "green");
+                    loadGames();
+                });
+            } catch (ApiException e) {
+                Platform.runLater(() -> setStatus("Delete failed: " + e.getMessage(), "red"));
+            }
+        }).start();
+    }
+
+    @FXML
+    private void handleBackup() {
+        setStatus("Creating backup...", "gray");
+        new Thread(() -> {
+            try {
+                String filename = ApiClient.createBackup();
+                Platform.runLater(() -> {
+                    setStatus("Backup created: " + filename, "green");
+                    Alert info = new Alert(Alert.AlertType.INFORMATION);
+                    info.setTitle("Backup created");
+                    info.setHeaderText("Database backup saved");
+                    info.setContentText("Filename: " + filename
+                            + "\n\nStored in the backups/ folder on the server.");
+                    info.showAndWait();
+                });
+            } catch (ApiException e) {
+                Platform.runLater(() -> setStatus("Backup failed: " + e.getMessage(), "red"));
+            }
+        }).start();
+    }
+
+    @FXML
+    private void handleRestore() {
+        TextInputDialog dialog = new TextInputDialog();
+        dialog.setTitle("Restore database");
+        dialog.setHeaderText("Restore from backup file");
+        dialog.setContentText("Enter the backup filename (e.g. backup-2026-05-27_12-54-01.sql):");
+
+        Optional<String> result = dialog.showAndWait();
+        if (result.isEmpty() || result.get().trim().isEmpty()) return;
+
+        String filename = result.get().trim();
+
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+        confirm.setTitle("Restore database");
+        confirm.setHeaderText("Restore from " + filename + "?");
+        confirm.setContentText("This will REPLACE all current data. Continue?");
+        Optional<ButtonType> ok = confirm.showAndWait();
+        if (ok.isEmpty() || ok.get() != ButtonType.OK) return;
+
+        setStatus("Restoring database...", "gray");
+        new Thread(() -> {
+            try {
+                String msg = ApiClient.restoreBackup(filename);
+                Platform.runLater(() -> {
+                    setStatus(msg, "green");
+                    loadGames();
+                });
+            } catch (ApiException e) {
+                Platform.runLater(() -> setStatus("Restore failed: " + e.getMessage(), "red"));
+            }
+        }).start();
+    }
+
+    private void openGameForm(Game existing) {
+        try {
+            FXMLLoader loader = new FXMLLoader(
+                    getClass().getResource("/fxml/gameForm.fxml")
+            );
+            Parent root = loader.load();
+
+            GameFormController controller = loader.getController();
+            controller.setGame(existing);
+            controller.setOnSaved(this::loadGames);
+
+            Stage stage = new Stage();
+            stage.setTitle(existing == null ? "New Game" : "Edit Game");
+            stage.setScene(new Scene(root));
+            stage.initModality(Modality.WINDOW_MODAL);
+            stage.initOwner(SceneManager.getPrimaryStage());
+            stage.showAndWait();
+        } catch (Exception e) {
+            setStatus("Could not open form: " + e.getMessage(), "red");
+        }
+    }
 
     private void loadGames() {
-        setBusy(true, "Loading games...");
+        setStatus("Loading games...", "gray");
+        refreshButton.setDisable(true);
 
         new Thread(() -> {
             try {
                 List<Game> result = ApiClient.getAllGames();
                 Platform.runLater(() -> {
                     games.setAll(result);
-                    setBusy(false, "Loaded " + result.size() + " games.");
+                    setStatus("Loaded " + result.size() + " games.", "green");
+                    refreshButton.setDisable(false);
                 });
             } catch (ApiException e) {
-                Platform.runLater(() -> setBusy(false, "Failed to load: " + e.getMessage()));
+                Platform.runLater(() -> {
+                    setStatus("Failed to load: " + e.getMessage(), "red");
+                    refreshButton.setDisable(false);
+                });
             }
         }).start();
     }
 
-    private void setBusy(boolean busy, String msg) {
-        refreshButton.setDisable(busy);
+    private void setStatus(String msg, String color) {
         statusLabel.setText(msg);
-        statusLabel.setStyle(busy ? "-fx-text-fill: gray;" : "-fx-text-fill: green;");
-        if (msg.toLowerCase().contains("fail")) {
-            statusLabel.setStyle("-fx-text-fill: red;");
-        }
+        statusLabel.setStyle("-fx-text-fill: " + color + ";");
     }
 }

@@ -147,6 +147,7 @@ public final class ApiClient {
 
     private static HttpRequest.Builder baseRequest(String path, boolean authRequired)
             throws ApiException {
+        System.out.println("[ApiClient] " + path);
         HttpRequest.Builder b = HttpRequest.newBuilder()
                 .uri(URI.create(BASE_URL + path))
                 .header("Accept", "application/json")
